@@ -8,22 +8,36 @@ from gpiozero import LED
 from threading import Condition
 from http import server
 import socketserver
+import math
+import json
+from openalpr import Alpr
+import sqlite3
 
 
 # Global constants
-output_width = 1280
-output_height = 960
+output_width = 1024
+output_height = 768
 
-IR_led = LED(20)
+IR_led1 = LED(20)
+IR_led2 = LED(21)
 np_image = None
+
+# This will tell us where the margin of the plate should be put 
+# To improve the detection
+plate_margin = 100
+
+def crop_image(np_image, x, y, width, height):
+    cropped = np_image[y:y+height, x:x+width]
+    return cropped
 
 
 class StreamingOutput(object):
-    def __init__(self, plate_cascade):
+    def __init__(self, plate_cascade, alpr_instance):
         self.frame = None
         self.buffer = io.BytesIO()
         self.condition = Condition()
         self.plate_cascade = plate_cascade
+        self.alpr_instance = alpr_instance
 
     def write(self, buf):
         global np_image
@@ -40,6 +54,7 @@ class StreamingOutput(object):
         # In this case, we preserve aspect ratio
         # To avoid distorting the image
         new_dim = (640, 480)
+        scale_factor = output_width / new_dim[0]  # Assume we have the same scale factor
         np_resized = cv2.resize(np_image, new_dim, interpolation= cv2.INTER_NEAREST)
 
         # Now, we will  perform the multiscale operation
@@ -50,8 +65,53 @@ class StreamingOutput(object):
         if len(results) > 0:
             print('Plate detected!')
 
+            print(results)
+            # Now that we have the results - we need to crop the result 
+            
+            for result in results:
+                x1 = result[0]
+                y1 = result[1]
+                x2 = result[0] + result[2]
+                y2 = result[1] + result[3]
+               
+                # Here - We must add some margin to improve the alpr results
+                x1 -= plate_margin
+                if x1 < 0:
+                    x1 = 0
+                
+                y1 -= plate_margin
+                if y1 < 0:
+                    y1 = 0
+
+                x2 += plate_margin
+                if x2 > new_dim[0]:
+                    x2 = new_dim[0]
+
+                y2 += plate_margin
+                if y2 > new_dim[1]:
+                    y2 = new_dim[1]
+
+                x = math.floor(x1 * scale_factor)
+                y = math.floor(y1 * scale_factor)
+                width = math.floor((x2 - x1) * scale_factor)
+                height = math.floor((y2 - y1) * scale_factor)
+
+                print('Scale factor: ', scale_factor)
+                print(x, y, width, height)
+                
+                # Now, we will generate the detection using openalpr
+                cropped = crop_image(np_image, x, y, width, height)
+              
+                # Generate the detection using the cropped image
+                output = self.alpr_instance.recognize_ndarray(cropped)
+                
+                for result in output['results']:
+                    print('Candidate Detected') 
+                    print('Plate', result['plate'])
+                    print('Confidence', result['confidence'])
+   
         end = time.time()
-        print('Elapsed: ', end - start)
+        # print('Elapsed: ', end - start)
 
         return self.buffer.write(buf)
 
@@ -88,11 +148,41 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             self.send_error(404)
             self.end_headers()
 
+    def do_POST(self):
+        # Processing post request
+        if self.path == '/start':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            response = {
+                'status': 'OK',
+                'session': 1234
+            }
+
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+        elif self.path == '/stop':
+            # TODO
+            # Generate the logic to handle the JSONs
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            response = {
+                'status': 'OK',
+                'session': 1234
+            }
+
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+        else:
+            self.send_error(404)
+            self.end_headers()
+  
+
 def main():
     print('Initializing main function')
 
     print('Turning on the led sensor')
-    # IR_led.on()
+    IR_led1.on()
+    IR_led2.on()
 
     # Initialize cascade classifier
     plate_cascade = cv2.CascadeClassifier()
@@ -102,6 +192,24 @@ def main():
         print('Error loading face cascade')
         exit(0) 
 
+    # Initializing alpr instance
+    alpr_instance = Alpr("us", "/usr/local/share/openalpr/config/openalpr.defaults.conf", \
+                        "/usr/local/share/openalpr/runtime_data")
+
+    if not alpr_instance.is_loaded():
+        print('Error loading alpr')
+        sys.exit(1)
+
+    # Connecting to database instance
+    sql_conn = sqlite3.connect('/root/raspilpr/plates.db')
+    print('Database was opened successfully')
+
+    print('Creating database tables')
+    query = 'create table if not exists Tb_Plates (Id int primary key, Plate text not null, integer real not null, Date text not null)'
+
+    sql_conn.execute(query)
+    print('Query executed')
+
     print('Setting capture function')
     # Capture an opencv compatible array
     with picamera.PiCamera() as camera:
@@ -109,7 +217,11 @@ def main():
         # To avoid losing FPS
         camera.framerate = 5
         camera.resolution = (output_width, output_height)
-        output = StreamingOutput(plate_cascade)
+        output = StreamingOutput(plate_cascade, alpr_instance)
+
+        # Retrieving exposure compensation
+        camera.exposure_compensation = -10
+
         camera.start_recording(output, format='bgr')
     
         print('Starting http server')
