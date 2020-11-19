@@ -1,3 +1,4 @@
+import datetime
 import time
 import picamera
 import picamera.array
@@ -12,6 +13,7 @@ import math
 import json
 from openalpr import Alpr
 import sqlite3
+import logging
 
 
 # Global constants
@@ -109,6 +111,7 @@ class StreamingOutput(object):
                     print('Candidate Detected') 
                     print('Plate', result['plate'])
                     print('Confidence', result['confidence'])
+                    print('Hour: ', datetime.datetime.now())
    
         end = time.time()
         # print('Elapsed: ', end - start)
@@ -179,6 +182,10 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
 
 def main():
     print('Initializing main function')
+
+    print('Configuring logger')
+    logging.basicConfig(filename='/root/plates.log', level=logging.DEBUG)
+    logging.debug('Testing Log')
 
     print('Turning on the led sensor')
     IR_led1.on()
